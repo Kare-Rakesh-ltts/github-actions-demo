@@ -1,0 +1,14 @@
+name: Run on SVN commit
+
+on:
+  repository_dispatch:
+    types: [svn-commit]
+
+jobs:
+  handle-svn-commit:
+    runs-on: self-hosted
+    steps:
+      - name: Echo payload:git
+        run: |
+          echo "SVN repo path: ${{ github.event.client_payload.repo_path }}"
+          echo "SVN revision: ${{ github.event.client_payload.revision }}"
