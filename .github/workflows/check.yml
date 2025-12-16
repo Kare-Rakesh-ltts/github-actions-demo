@@ -34,5 +34,5 @@ jobs:
         with:
           name: test-artifacts
           path: |
-            output.txt
+            job_output.txt
             reports/junit.xml
