@@ -1,5 +1,5 @@
 
-name: Python HTML Diff
+name: Python HTML Diff (4 files)
 
 on:
   workflow_dispatch:
@@ -17,128 +17,230 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Create diff script
+      - name: Create multi diff script
         shell: powershell
         run: |
           $script = @'
           #!/usr/bin/env python3
-          import argparse, html, os, re, sys
+          """
+          Generate side-by-side HTML diffs for multiple ARXML pairs.
+
+          Usage (example for 4 files / 2 pairs):
+            python multi_diff.py \
+              --left-list  "Files/ECUConfig_v1.arxml,Files/ExampleComponent_v1.arxml" \
+              --right-list "Files/ECUConfig_v2.arxml,Files/ExampleComponent_v2.arxml" \
+              --out-dir diffs --full-context --xml-canonicalize \
+              --title-prefix "ARXML Diff (Python)" --remove-body-h1
+          """
+
+          import argparse
+          import html
+          import os
+          import re
+          import sys
           from difflib import HtmlDiff
 
-          def read_text(p):
-              if not os.path.exists(p): raise FileNotFoundError(f"File not found: {p}")
+          # ---------- IO helpers ----------
+          def read_text(p: str) -> str:
+              if not os.path.exists(p):
+                  raise FileNotFoundError(f"File not found: {p}")
               return open(p, "r", encoding="utf-8", errors="replace").read()
 
-          def write_text(p, s):
+          def write_text(p: str, s: str) -> None:
               os.makedirs(os.path.dirname(os.path.abspath(p)), exist_ok=True)
               open(p, "w", encoding="utf-8").write(s)
 
-          def normalize_line_endings(t): return t.replace("\r\n","\n").replace("\r","\n")
-          def normalize_whitespace(t):
+          # ---------- Normalization ----------
+          def normalize_line_endings(t: str) -> str:
+              return t.replace("\r\n", "\n").replace("\r", "\n")
+
+          def normalize_whitespace(t: str) -> str:
               t = normalize_line_endings(t)
-              t = re.sub(r"[ \t]+"," ", t)
+              t = re.sub(r"[ \t]+", " ", t)
               return "\n".join(line.rstrip() for line in t.split("\n"))
 
-          def canonicalize_xml(t):
+          # ---------- Lightweight XML canonicalization ----------
+          def canonicalize_xml(t: str) -> str:
               t = normalize_line_endings(t)
               try:
                   from xml.etree import ElementTree as ET
                   root = ET.fromstring(t)
               except Exception:
+                  # Not XML or parse error: fallback to whitespace normalization
                   return normalize_whitespace(t)
-              def _ws(s): return re.sub(r"\s+"," ", s).strip()
+
+              def _ws(s: str) -> str:
+                  return re.sub(r"\s+", " ", s).strip()
+
               def _norm(n):
                   if n.text is not None: n.text = _ws(n.text)
                   if n.tail is not None: n.tail = _ws(n.tail)
                   if n.attrib:
                       items = sorted(n.attrib.items(), key=lambda kv: kv[0])
                       n.attrib.clear()
-                      for k,v in items: n.attrib[k] = v
-                  for c in list(n): _norm(c)
+                      for k, v in items:
+                          n.attrib[k] = v
+                  for c in list(n):
+                      _norm(c)
+
               _norm(root)
               return _serialize_compact(root)
 
           def _serialize_compact(elem):
-              def esc(s): return (s.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;"))
-              def attrs_str(a):
-                  return "" if not a else " " + " ".join(f'{k}="{esc(v)}"' for k,v in a.items())
-              def node_str(n):
-                  start = f"<{n.tag}{attrs_str(n.attrib)}>"
+              # Deterministic compact XML string with minimal escaping
+              def _escape_xml(s):
+                  return (s.replace("&", "&amp;")
+                           .replace("<", "&lt;")
+                           .replace(">", "&gt;")
+                           .replace('"', "&quot;"))
+
+              def _attrs_str(a):
+                  if not a: return ""
+                  parts = [f'{k}="{_escape_xml(v)}"' for k, v in a.items()]
+                  return " " + " ".join(parts)
+
+              def _node_str(n):
+                  start = f"<{n.tag}{_attrs_str(n.attrib)}>"
                   end = f"</{n.tag}>"
-                  text = esc(n.text or "")
-                  kids = "".join(node_str(c) for c in list(n))
+                  text = _escape_xml(n.text or "")
+                  kids = "".join(_node_str(c) for c in list(n))
                   return f"{start}{text}{kids}{end}"
-              s = node_str(elem)
+
+              s = _node_str(elem)
+              # Improve readability in line-based diff
               return re.sub(r">(</)", ">\n</", s)
 
-              # (Note: simple compact XML output for deterministic diff.)
+          # ---------- Diff generation ----------
+          def make_html_diff(left: str, right: str, la: str, lb: str,
+                             full_context: bool, context_lines: int, wrap_column: int) -> str:
+              d = HtmlDiff(tabsize=4, wrapcolumn=(wrap_column if wrap_column and wrap_column > 0 else None))
+              return d.make_file(left.splitlines(), right.splitlines(), la, lb,
+                                 context=not full_context, numlines=(context_lines if not full_context else 0))
 
-          def make_html_diff(a, b, la, lb, full, ctx, wrap):
-              d = HtmlDiff(tabsize=4, wrapcolumn=(wrap if wrap and wrap>0 else None))
-              return d.make_file(a.splitlines(), b.splitlines(), la, lb, context=not full, numlines=(ctx if not full else 0))
-
-          def post(html_str, title, remove_h1):
+          def post_process(html_str: str, title: str | None, remove_first_h1: bool) -> str:
               if title:
                   safe = html.escape(title, quote=False)
-                  html_str = re.sub(r"(?is)(<title>).*?(</title>)", rf"\\1{safe}\\2", html_str, count=1)
-              if remove_h1:
+                  html_str = re.sub(r"(?is)(<title>).*?(</title>)", rf"\1{safe}\2", html_str, count=1)
+              if remove_first_h1:
                   html_str = re.sub(r"(?is)<h1[^>]*>.*?</h1>", "", html_str, count=1)
               return html_str
 
-          def parse(argv):
-              p = argparse.ArgumentParser(description="Generate HTML side-by-side diff.")
-              p.add_argument("--left", required=True)
-              p.add_argument("--right", required=True)
-              p.add_argument("--out", required=True)
-              p.add_argument("--full-context", action="store_true")
-              p.add_argument("--context-lines", type=int, default=3)
-              p.add_argument("--wrap-column", type=int, default=120)
-              p.add_argument("--ignore-whitespace", action="store_true")
-              p.add_argument("--xml-canonicalize", action="store_true")
-              p.add_argument("--title", default=None)
-              p.add_argument("--remove-body-h1", action="store_true")
+          # ---------- Naming helpers ----------
+          def infer_base_name(la: str, lb: str, index: int) -> str:
+              # Prefer stripping _v1/_v2 for nicer filenames
+              def strip_suffix(name):
+                  return re.sub(r"(_v[12])\.arxml$", "", name, flags=re.IGNORECASE)
+              sa, sb = strip_suffix(la), strip_suffix(lb)
+              base = sa if sa == sb else os.path.splitext(os.path.commonprefix([sa, sb]))[0]
+              return base or f"pair_{index}"
+
+          # ---------- CLI ----------
+          def parse_args(argv):
+              p = argparse.ArgumentParser(description="Generate HTML diffs for multiple ARXML pairs.")
+              # Comma-separated lists (for convenience)
+              p.add_argument("--left-list", required=True, help="Comma-separated left files")
+              p.add_argument("--right-list", required=True, help="Comma-separated right files")
+              p.add_argument("--out-dir", default="diffs", help="Output directory (default: diffs)")
+              p.add_argument("--full-context", action="store_true", help="Show entire files.")
+              p.add_argument("--context-lines", type=int, default=3, help="Context lines for hunked view.")
+              p.add_argument("--wrap-column", type=int, default=160, help="Soft wrap column in cells (<=0 to disable).")
+              p.add_argument("--xml-canonicalize", action="store_true", help="Lightweight XML normalization.")
+              p.add_argument("--ignore-whitespace", action="store_true", help="Normalize whitespace before diffing.")
+              p.add_argument("--title-prefix", default="ARXML Diff (Python)", help="Prefix for HTML <title>.")
+              p.add_argument("--remove-body-h1", action="store_true", help="Remove first <h1> to avoid duplicate titles.")
               return p.parse_args(argv)
 
-          def main():
-              args = parse(sys.argv[1:])
-              left_raw = read_text(args.left)
-              right_raw = read_text(args.right)
-              if args.xml_canonicalize:
-                  left_norm = canonicalize_xml(left_raw)
-                  right_norm = canonicalize_xml(right_raw)
-              elif args.ignore_whitespace:
-                  left_norm = normalize_whitespace(left_raw)
-                  right_norm = normalize_whitespace(right_raw)
-              else:
-                  left_norm = normalize_line_endings(left_raw)
-                  right_norm = normalize_line_endings(right_raw)
+          def main(argv=None):
+              args = parse_args(argv or sys.argv[1:])
 
-              la = os.path.basename(args.left)
-              lb = os.path.basename(args.right)
-              html_str = make_html_diff(left_norm, right_norm, la, lb, args.full_context, args.context_lines, args.wrap_column)
-              html_str = post(html_str, args.title, args.remove_body_h1)
-              write_text(args.out, html_str)
-              print(f"✔ Diff HTML written to: {args.out}")
+              lefts  = [s.strip() for s in args.left_list.split(",")  if s.strip()]
+              rights = [s.strip() for s in args.right_list.split(",") if s.strip()]
+
+              if not lefts or not rights or len(lefts) != len(rights):
+                  raise SystemExit("Provide equal counts of left/right files via --left-list and --right-list.")
+
+              # Fail-fast for missing files
+              missing = [p for p in lefts + rights if not os.path.exists(p)]
+              if missing:
+                  raise SystemExit(f"Missing files: {', '.join(missing)}")
+
+              os.makedirs(args.out_dir, exist_ok=True)
+              index_items = []
+
+              for i, (lpath, rpath) in enumerate(zip(lefts, rights), start=1):
+                  lraw = read_text(lpath)
+                  rraw = read_text(rpath)
+
+                  if args.xml_canonicalize:
+                      lnorm = canonicalize_xml(lraw)
+                      rnorm = canonicalize_xml(rraw)
+                  elif args.ignore_whitespace:
+                      lnorm = normalize_whitespace(lraw)
+                      rnorm = normalize_whitespace(rraw)
+                  else:
+                      lnorm = normalize_line_endings(lraw)
+                      rnorm = normalize_line_endings(rraw)
+
+                  la = os.path.basename(lpath)
+                  lb = os.path.basename(rpath)
+                  base = infer_base_name(la, lb, i)
+
+                  html_str = make_html_diff(lnorm, rnorm, la, lb,
+                                            args.full_context, args.context_lines, args.wrap_column)
+                  title = f"{args.title_prefix}: {base}"
+                  html_str = post_process(html_str, title=title, remove_first_h1=args.remove_body_h1)
+
+                  out_file = os.path.join(args.out_dir, f"{base}.html")
+                  write_text(out_file, html_str)
+                  index_items.append((base, os.path.basename(out_file)))
+                  print(f"✔ Generated: {out_file}")
+
+              # Build index.html with proper links
+              items_html = "\n".join(
+                  f'<li><a href="{fname}">{html.escape(base)}</a></li>'
+                  for base, fname in index_items
+              )
+              index_html = f"""<!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <title>ARXML Diff Index</title>
+            <style>
+              body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 2rem; }}
+              h1 {{ margin-top: 0; }}
+              ul {{ line-height: 1.6; }}
+            </style>
+          </head>
+          <body>
+            <h1>ARXML Diff Index</h1>
+            <ul>
+              {items_html}
+            </ul>
+          </body>
+          </html>"""
+              write_text(os.path.join(args.out_dir, "index.html"), index_html)
+              print(f"✔ Index written: {os.path.join(args.out_dir, 'index.html')}")
 
           if __name__ == "__main__":
               main()
           '@
-          Set-Content -Path "$env:GITHUB_WORKSPACE\generate_diff.py" -Value $script -Encoding UTF8
+          Set-Content -Path "$env:GITHUB_WORKSPACE\multi_diff.py" -Value $script -Encoding UTF8
 
-      - name: Generate HTML diff
+      - name: Run multi-pair diffs (4 files)
         shell: powershell
         run: |
-          python "$env:GITHUB_WORKSPACE\generate_diff.py" `
-            --left "Files\ExampleComponent_v1.arxml" `
-            --right "Files\ExampleComponent_v2.arxml" `
-            --out "diff.html" `
+          $outDir = Join-Path "${{ github.workspace }}" "diffs"
+          python "$env:GITHUB_WORKSPACE\multi_diff.py" `
+            --left-list  "Files/ECUConfig_v1.arxml,Files/ExampleComponent_v1.arxml" `
+            --right-list "Files/ECUConfig_v2.arxml,Files/ExampleComponent_v2.arxml" `
+            --out-dir "$outDir" `
             --full-context `
             --xml-canonicalize `
-            --title "ARXML Diff (Python)" `
+            --title-prefix "ARXML Diff (Python)" `
             --remove-body-h1
 
-      - name: Upload artifact
+      - name: Upload diffs artifact
         uses: actions/upload-artifact@v4
         with:
-          name: python-diff
-          path: diff.html
+          name: arxml-diffs
+          path: diffs
