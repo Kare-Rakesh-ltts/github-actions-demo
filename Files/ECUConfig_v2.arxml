@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<AUTOSAR xmlns="http://autosar.org/schema/r4.0">
+  <AR-PACKAGES>
+    <AR-PACKAGE>
+      <SHORT-NAME>ECUConfig</SHORT-NAME>
+      <ELEMENTS>
+        <ECU-CONFIGURATION>
+          <SHORT-NAME>ECUConfig_V2</SHORT-NAME>
+          <ECU-INSTANCE>
+            <SHORT-NAME>ECU1</SHORT-NAME>
+            <HW-REF>HWPlatform_B</HW-REF>
+          </ECU-INSTANCE>
+          <SOFTWARE-COMPONENT>
+            <SHORT-NAME>EngineControl</SHORT-NAME>
+            <VERSION>2.0.0</VERSION>
+          </SOFTWARE-COMPONENT>
+          <SOFTWARE-COMPONENT>
+            <SHORT-NAME>TransmissionControl</SHORT-NAME>
+            <VERSION>1.0.0</VERSION>
+          </SOFTWARE-COMPONENT>
+        </ECU-CONFIGURATION>
+      </ELEMENTS>
+    </AR-PACKAGE>
+  </AR-PACKAGES>
+</AUTOSAR>
